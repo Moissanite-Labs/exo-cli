@@ -218,6 +218,7 @@ class ExoApp(App):
         self.ready = asyncio.Event()
         self.cur: Block | None = None
         self.cur_id: str | None = None
+        self.reply_blocks: dict[str, Block] = {}
         self.last_answer: tuple[str | None, str] = (None, "")
         self.tools: dict[str, ToolBlock] = {}
         self.approvals: list[s.ApprovalRequested] = []
@@ -583,6 +584,7 @@ class ExoApp(App):
     def handle(self, ev: s.Event) -> None:
         b = ev.body
         if isinstance(b, s.TurnStarted):
+            self.reply_blocks.clear()
             self.busy = True
             self.turn_t0 = time.monotonic()
             self.model = b.model or self.model
@@ -596,6 +598,8 @@ class ExoApp(App):
             self.gstate.long_turn = (b.timing.get("wall_ms", 0) - b.timing.get("tool_ms", 0)
                                      - b.timing.get("approval_ms", 0)) >= LONG_TURN_MS
             self.busy = False
+            if b.stop_reason == "interrupted":
+                self.note("turn stopped", "hint")
             self.turn_t0 = 0.0
             self.running_tools = 0
             self.close_cur()
@@ -612,9 +616,12 @@ class ExoApp(App):
             if self.cur is None or self.cur_id != b.message_id:
                 self.cur_id = b.message_id
                 self.close_cur()
-                self.cur = Block("", "assistant")
+                self.cur = self.reply_blocks.get(b.message_id)
+                if self.cur is None:
+                    self.cur = Block("", "assistant")
+                    self.reply_blocks[b.message_id] = self.cur
+                    self.add(self.cur)
                 self.cur.streaming = True
-                self.add(self.cur)
             self.cur.text += b.text
             self.mark_dirty()
         elif isinstance(b, s.MessageCompleted):
@@ -635,17 +642,20 @@ class ExoApp(App):
             if m.role == "assistant":
                 text = m.text()
                 if text:
-                    if self.cur is None or self.cur_id != m.id:
-                        if self.cur is None or not self.cur.text:
-                            self.cur = Block(text, "assistant")
-                            self.add(self.cur)
-                    self.cur.text = text
-                    self.cur.streaming = False
-                    if self.cur.is_mounted:
-                        self.cur.flush()
+                    block = self.reply_blocks.get(m.id) if m.id else None
+                    if block is None:
+                        block = Block(text, "assistant")
+                        if m.id:
+                            self.reply_blocks[m.id] = block
+                        self.add(block)
+                    block.text = text
+                    block.streaming = False
+                    if block.is_mounted:
+                        block.flush()
                         self.to_latest()
                     self.last_answer = (m.id, text)
-                self.close_cur()
+                if self.cur_id == m.id:
+                    self.close_cur()
         elif isinstance(b, s.ToolStarted):
             tb = ToolBlock(b.call.id, b.call.name, b.call.arguments)
             tb.expanded = self.expanded
@@ -766,6 +776,7 @@ class ExoApp(App):
     def clear_transcript(self) -> None:
         self.transcript.remove_children()
         self.tools.clear()
+        self.reply_blocks.clear()
         self.cur = None
         self.older = []
         self.earlier_row = None
@@ -2139,9 +2150,18 @@ class ExoApp(App):
         if not (self.busy and self.session):
             self.note("nothing is running", "hint")
             return
-        self.note("stopped", "hint")
+        self.note("stop requested; waiting for the turn to finish", "hint")
         self.hint("interrupt")
-        self.run_worker(self.post(s.TurnInterrupt(session=self.session)), exit_on_error=False)
+        self.run_worker(self.request_stop(self.session), exit_on_error=False)
+
+    async def request_stop(self, session: str) -> None:
+        resp = await self.post(s.TurnInterrupt(session=session))
+        if self.session != session:
+            return
+        if resp.ok and resp.result.get("interrupted") == 0:
+            self.note("no running turn was found by the core", "hint")
+        # A successful interrupt reply acknowledges the request, not completion.
+        # Only TurnCompleted can confirm that the turn has stopped.
 
     def action_ctrl_c(self) -> None:
         if self.busy and self.session:

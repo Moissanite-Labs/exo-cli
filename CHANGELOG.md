@@ -8,6 +8,9 @@ follow [docs/VERSIONING.md](docs/VERSIONING.md): SemVer, with a codename per MAJ
 - Added a gate PR preflight job that runs plugin acceptance and the base comparator, retaining its differential artifact (#423). Hosted execution and required-check configuration remain pending.
 
 ### Fixed
+- The terminal keeps each assistant reply in its original block when a memory notice interrupts streaming.
+- Stop requests say they are pending until the core confirms an interrupted turn. A failed request no longer
+  claims the turn stopped.
 - The web guidance line after a failed model call now reads what the core records (#855, D-092 amendment).
   - A connection drop or timeout says the model could not be reached. Before, it pointed at `/trace`: the router
     reports a failure before any output as "all routes failed or are cooling down", and the `ReadError` or
