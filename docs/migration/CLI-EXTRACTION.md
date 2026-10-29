@@ -52,3 +52,16 @@ change. Recheck them and coordinate with each author before porting or retargeti
 
 This is a small sample, not a complete inventory of open work. Existing PR numbers, review evidence and
 owner branches remain intact.
+
+## Issue routing
+
+Issues are enabled in `Moissanite-Labs/exo-cli`. File newly identified CLI-only issues there. Keep
+cross-cutting engine and consumer work in Exo until its owners agree how to split it.
+
+[Exo #665](https://github.com/Moissanite-Labs/exo/issues/665), the terminal reasoning display, is a
+CLI-only transfer candidate. Its implementation [#666](https://github.com/Moissanite-Labs/exo/pull/666)
+is still open in Exo, so coordinate with that author and preserve the PR and review links before moving
+or duplicating anything. [#677](https://github.com/Moissanite-Labs/exo/issues/677) spans terminal, web,
+core stream recovery and replay safety. [#259](https://github.com/Moissanite-Labs/exo/issues/259) spans
+TUI and core refactoring. Keep both in Exo unless owners agree on a split. This is a bounded candidate
+list, not a bulk-transfer instruction.
