@@ -120,7 +120,8 @@ See [`CHANGELOG.md`](CHANGELOG.md) and [`docs/VERSIONING.md`](docs/VERSIONING.md
 |---|---|
 | [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md) | Using Exo day to day |
 | [`docs/DEVELOPER-GUIDE.md`](docs/DEVELOPER-GUIDE.md) | Building on Exo: the protocol, plugins, tools, tests |
-| [`docs/REPOSITORY-WORKFLOW.md`](docs/REPOSITORY-WORKFLOW.md) | Where changes belong, reviewed desktop syncs and the transition from paired PRs |
+| [`docs/REPOSITORY-WORKFLOW.md`](docs/REPOSITORY-WORKFLOW.md) | CLI fork routing and the transition; links to the canonical Exo workflow for shared work and desktop syncs |
+| [`docs/migration/CLI-EXTRACTION.md`](docs/migration/CLI-EXTRACTION.md) | CLI and core coupling at the fork point and a proposed extraction sequence |
 | [Whitepaper](https://exo.askaconsult.com/whitepaper/) | How each part works and why, with the trade-offs |
 | [`docs/DOCS-MAP.md`](docs/DOCS-MAP.md) | Index of every doc, and what is still missing |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, memory and context model |
