@@ -20,7 +20,7 @@ COMMAND_MODULES = (
     'exo.ledger', 'exo.store', 'exo.crypto', 'exo.ingest.cli', 'exo.ask', 'exo.eval', 'exo.brief',
     'exo.consolidate', 'exo.onboard', 'exo.upstream', 'exo.cli_chat', 'exo.models_cmd', 'exo.providers_cmd',
     'exo.decide_cmd', 'exo.trace_cmd', 'exo.memory_cmd', 'exo.baseline.cli', 'exo.swarm_cmd', 'exo.profile_cmd',
-    'httpx', 'nacl',
+    'exo.swarm_knowledge_cmd', 'httpx', 'nacl',
 )
 
 # Every name `from exo.cli import ...` could reach before #260, other than the functions still defined here.

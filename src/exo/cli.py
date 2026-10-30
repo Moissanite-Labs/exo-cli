@@ -77,6 +77,8 @@ LAZY = {
     'chat': ('cli_chat', 'cmd_chat', 'chat with exod from the terminal'),
     'swarm': ('swarm_cmd', 'cmd_swarm', 'launch a swarm group and serve it (exo chat connects to it) [experimental]'),
     'profile': ('profile_cmd', 'cmd_profile', 'create profiles (seats) on the profile store [experimental]'),
+    'swarm-knowledge': ('swarm_knowledge_cmd', 'cmd_swarm_knowledge',
+                        'group knowledge: publish, read, list, history [experimental]'),
     'models': ('models_cmd', 'cmd_models', 'configured providers, keys found, and the route for each role'),
     'providers': ('providers_cmd', 'cmd_providers',
                   'set up model providers: status, add or remove a key, test, default model'),
