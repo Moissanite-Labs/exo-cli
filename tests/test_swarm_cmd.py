@@ -12,8 +12,8 @@ from exo import cli, swarm_cmd
 
 def ns(**over):
     a = argparse.Namespace(cmd='swarm', profiles='seat1,seat2', seat=None, socket=None,
-                           stdio=False, mode=None, conductor=None, start=False,
-                           max_turns=None, idle_timeout=None)
+                           stdio=False, mode='conductor', conductor=None, conversation=False,
+                           start=False, max_turns=None, idle_timeout=None)
     return argparse.Namespace(**{**vars(a), **over})
 
 
@@ -46,10 +46,56 @@ def test_parser_flags():
         parse('--profiles', 'a,b', '--socket', '/tmp/x.sock', '--stdio')
 
 
-def test_no_mode_flags_until_core_supports_mode():
-    """group_launch.create hardcodes conductor mode; --mode is an argparse error, never a fake."""
+def test_parser_accepts_mode_and_conductor():
+    a = parse('--profiles', 'a,b')
+    assert a.mode == 'conductor' and a.conductor is None
+    a = parse('--profiles', 'a,b', '--mode', 'socratic')
+    assert a.mode == 'socratic'
+    a = parse('--profiles', 'a,b', '--mode', 'conductor', '--conductor', 'seat2')
+    assert a.mode == 'conductor' and a.conductor == 'seat2'
+    a = parse('--profiles', 'a,b', '--conductor', 'seat1')
+    assert a.conductor == 'seat1'
+
+
+def test_parser_rejects_unknown_mode():
     with pytest.raises(SystemExit):
-        parse('--profiles', 'a,b', '--mode', 'socratic')
+        parse('--profiles', 'a,b', '--mode', 'weird')
+
+
+def test_parser_bounds_default_to_none():
+    a = parse('--profiles', 'a,b', '--conversation', '--start')
+    assert a.max_turns is None and a.idle_timeout is None
+
+
+def test_parser_rejects_nonpositive_max_turns():
+    with pytest.raises(SystemExit):
+        parse('--profiles', 'a,b', '--max-turns', '0')
+    with pytest.raises(SystemExit):
+        parse('--profiles', 'a,b', '--max-turns=-1')
+    with pytest.raises(SystemExit):
+        parse('--profiles', 'a,b', '--max-turns', 'x')
+
+
+def test_parser_rejects_nonfinite_idle_timeout():
+    for bad in ('0', '-1', 'nan', 'inf', '-inf', 'abc'):
+        with pytest.raises(SystemExit):
+            parse('--profiles', 'a,b', '--idle-timeout', bad)
+
+
+def test_parser_accepts_core_boundary_bounds():
+    a = parse('--profiles', 'a,b', '--max-turns', '10000')
+    assert a.max_turns == 10000
+    a = parse('--profiles', 'a,b', '--idle-timeout', '86400')
+    assert a.idle_timeout == 86400.0
+
+
+def test_parser_rejects_bounds_above_core_maxima(capsys):
+    with pytest.raises(SystemExit):
+        parse('--profiles', 'a,b', '--max-turns', '10001')
+    assert '10000' in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        parse('--profiles', 'a,b', '--idle-timeout', '86401')
+    assert '86400' in capsys.readouterr().err
 
 
 def test_start_help_says_one_turn_per_member_immediately(capsys):
@@ -58,17 +104,22 @@ def test_start_help_says_one_turn_per_member_immediately(capsys):
     help_text = capsys.readouterr().out
     assert 'run one model turn per member immediately' in help_text
     assert 'no run occurs until a principal /group start' in help_text
+    assert '--conversation' in help_text and 'bounded' in help_text
+    assert '--mode' in help_text and '--conductor' in help_text
+    assert '--max-turns' in help_text and '--idle-timeout' in help_text
 
 
 def test_docstring_has_no_em_dashes():
     assert '\u2014' not in (swarm_cmd.__doc__ or '')
 
 
-def test_docstring_documents_principal_controls_and_first_profile_conductor():
+def test_docstring_documents_principal_controls_modes_and_conversation():
     doc = swarm_cmd.__doc__ or ''
-    assert 'first profile' in doc and 'conductor' in doc
+    assert 'first profile' in doc and 'conductor' in doc and 'socratic' in doc
+    assert 'bounded' in doc and 'conversation' in doc and 'one-shot' in doc
     assert 'principal' in doc and 'Unix socket' in doc
     assert 'stdio protocol alone cannot grant principal' in doc
+    assert '#1019' in doc  # the required core dependency is documented
 
 
 # --- fail-closed validation (no core imported, nothing allocated) -------------
@@ -76,6 +127,27 @@ def test_docstring_documents_principal_controls_and_first_profile_conductor():
 def test_empty_profile_entry_fails_closed(capsys):
     assert swarm_cmd.cmd_swarm(ns(profiles='seat1,,seat2')) == 1
     assert 'empty entry' in capsys.readouterr().err
+
+
+def test_bounds_without_conversation_fail_closed(capsys):
+    assert swarm_cmd.cmd_swarm(ns(max_turns=3)) == 1
+    assert '--max-turns/--idle-timeout require --conversation' in capsys.readouterr().err
+    assert swarm_cmd.cmd_swarm(ns(idle_timeout=30.0)) == 1
+    assert '--max-turns/--idle-timeout require --conversation' in capsys.readouterr().err
+
+
+def test_conversation_without_start_fails_closed(capsys):
+    assert swarm_cmd.cmd_swarm(ns(conversation=True)) == 1
+    assert '--conversation requires --start' in capsys.readouterr().err
+    assert swarm_cmd.cmd_swarm(ns(conversation=True, max_turns=3)) == 1
+    assert '--conversation requires --start' in capsys.readouterr().err
+
+
+def test_bounds_above_core_maxima_fail_closed(capsys):
+    assert swarm_cmd.cmd_swarm(ns(start=True, conversation=True, max_turns=10001)) == 1
+    assert '10000' in capsys.readouterr().err
+    assert swarm_cmd.cmd_swarm(ns(start=True, conversation=True, idle_timeout=86401.0)) == 1
+    assert '86400' in capsys.readouterr().err
 
 
 def test_missing_core_feature_is_a_useful_error(monkeypatch, capsys):
@@ -96,7 +168,7 @@ def test_missing_core_feature_is_a_useful_error(monkeypatch, capsys):
 # --- lifecycle: one loop, ordered start -> serve -> aclose ---------------------
 
 class FakeConversationOptions:
-    def __init__(self, *, max_turns, idle_timeout):
+    def __init__(self, *, max_turns=8, idle_timeout=300.0):
         self.max_turns, self.idle_timeout = max_turns, idle_timeout
 
 
@@ -126,10 +198,14 @@ class FakeLaunch:
         self.engine = object()  # GroupLaunch is not an Engine; serve takes launch.engine
         self.calls = calls
 
-    def start(self):
-        self.calls.append(('launch.start',))
-        # GroupLaunch.start delegates to the host with audiences derived from the stored mode.
-        self.host.start(self.group.id, audiences={'seat1': ['seat2'], 'seat2': ['seat1']})
+    def start(self, *, conversation=None):
+        if conversation is None:
+            self.calls.append(('launch.start', None))
+            # one-shot: GroupLaunch.start derives audiences from the stored mode
+            self.host.start(self.group.id, audiences={'seat1': ['seat2'], 'seat2': ['seat1']})
+        else:
+            self.calls.append(('launch.start', conversation))
+            self.host.start(self.group.id, conversation=conversation)
 
     async def aclose(self):
         await asyncio.sleep(0)  # prove we are on the running loop
@@ -143,8 +219,8 @@ class FakeCore:
         self.launch = FakeLaunch(calls, start_exc)
         self.create_exc = create_exc
 
-        def create(seat, *, profiles):
-            calls.append(('create', seat, list(profiles)))
+        def create(seat, *, profiles, mode='conductor', conductor=None):
+            calls.append(('create', seat, list(profiles), mode, conductor))
             if self.create_exc:
                 raise self.create_exc
             return self.launch
@@ -179,7 +255,7 @@ def test_defaults_do_not_start_or_serve_socket(monkeypatch, capsys):
     FakeCore(monkeypatch, calls)
     rc, err, out = run_cmd(capsys, ns(stdio=True))
     assert rc == 0
-    assert calls[0] == ('create', None, ['seat1', 'seat2'])
+    assert calls[0] == ('create', None, ['seat1', 'seat2'], 'conductor', None)
     assert ('serve', {'stdio': True}) in calls
     assert calls[-1] == ('launch.aclose',)
     assert not any(c[0] in ('launch.start', 'host.start') for c in calls)  # no default-on
@@ -192,7 +268,7 @@ def test_banner_without_start_waits_for_explicit_group_start(monkeypatch, capsys
     rc, err, _ = run_cmd(capsys, ns(stdio=True))
     assert rc == 0
     assert 'not started: waiting for an explicit principal /group start' in err
-    assert 'already run' not in err
+    assert 'one model turn per member scheduled' not in err
 
 
 def test_start_flag_binds_engines_before_serving(monkeypatch, capsys):
@@ -208,8 +284,48 @@ def test_banner_when_started_reports_one_turn_per_member(monkeypatch, capsys):
     FakeCore(monkeypatch, calls)
     rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True))
     assert rc == 0
-    assert 'started: one model turn per member already run' in err
+    assert 'started: one model turn per member scheduled (one-shot)' in err
     assert 'waiting for an explicit principal /group start' not in err
+
+
+def test_mode_and_conductor_are_forwarded_to_create(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, _, _ = run_cmd(capsys, ns(stdio=True, mode='socratic'))
+    assert rc == 0
+    assert calls[0] == ('create', None, ['seat1', 'seat2'], 'socratic', None)
+    calls.clear()
+    run_cmd(capsys, ns(stdio=True, mode='conductor', conductor='seat2'))
+    assert calls[0] == ('create', None, ['seat1', 'seat2'], 'conductor', 'seat2')
+
+
+def test_conversation_start_forwards_bound_options(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True, conversation=True,
+                                    max_turns=4, idle_timeout=120.0))
+    assert rc == 0
+    # create keeps the default mode/conductor pair
+    assert calls[0] == ('create', None, ['seat1', 'seat2'], 'conductor', None)
+    # launch.start got a ConversationOptions carrying exactly the CLI bounds
+    assert any(c[0] == 'launch.start' and isinstance(c[1], FakeConversationOptions)
+               and c[1].max_turns == 4 and c[1].idle_timeout == 120.0 for c in calls)
+    # and the host received that same conversation, not derived audiences
+    host_start = [c for c in calls if c[0] == 'host.start']
+    assert len(host_start) == 1 and 'conversation' in host_start[0][2]
+    assert 'audiences' not in host_start[0][2]
+    assert 'started: bounded reactive conversation running' in err
+    assert 'max 4 turns per member' in err and 'idle timeout 120s' in err
+
+
+def test_conversation_start_uses_core_defaults_when_bounds_omitted(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True, conversation=True))
+    assert rc == 0
+    conv = [c[1] for c in calls if c[0] == 'launch.start' and isinstance(c[1], FakeConversationOptions)]
+    assert conv and conv[0].max_turns == 8 and conv[0].idle_timeout == 300.0
+    assert '(core default bounds)' in err
 
 
 def test_socket_transport(monkeypatch, capsys):
