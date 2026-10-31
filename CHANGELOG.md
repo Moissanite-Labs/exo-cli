@@ -8,6 +8,7 @@ follow [docs/VERSIONING.md](docs/VERSIONING.md): SemVer, with a codename per MAJ
 - Added a gate PR preflight job that runs plugin acceptance and the base comparator, retaining its differential artifact (#423). Hosted execution and required-check configuration remain pending.
 
 ### Fixed
+- Carried the certifi 2026.10.23 trust-bundle update from canonical Exo commit `568b903fc45984052b888636ef53647c2a10a38f` for [GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2). Existing environments and packaged apps need a dependency refresh or rebuild to receive the updated bundle.
 - The web guidance line after a failed model call now reads what the core records (#855, D-092 amendment).
   - A connection drop or timeout says the model could not be reached. Before, it pointed at `/trace`: the router
     reports a failure before any output as "all routes failed or are cooling down", and the `ReadError` or
