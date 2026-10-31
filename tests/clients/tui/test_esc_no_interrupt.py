@@ -41,7 +41,8 @@ def test_ctrl_c_during_a_turn_stops_it_and_keeps_the_draft(tmp_path):
         await pilot.press("ctrl+c")
         await until(lambda: interrupts(app), pilot)
         assert app.composer.text == "draft"
-        assert "stopped" in app.transcript_text()
+        assert "stop requested" in app.transcript_text()
+        assert "turn stopped" not in app.transcript_text()
 
     run(tmp_path, sc)
 
@@ -60,7 +61,8 @@ def test_slash_stop_stops_the_turn(tmp_path):
         app.busy = True
         await send(app, pilot, "/stop")
         await until(lambda: interrupts(app), pilot)
-        assert "stopped" in app.transcript_text()
+        assert "stop requested" in app.transcript_text()
+        assert "turn stopped" not in app.transcript_text()
 
     run(tmp_path, sc)
 
@@ -217,3 +219,51 @@ def test_failover_does_not_block_the_event_loop(tmp_path, monkeypatch):
         assert ticks >= 5, f"the loop was blocked during failover (ticks={ticks})"
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("failure", ["lost", "connect", "refused", "accepted", "idle"])
+def test_stop_never_claims_completion_from_a_request(tmp_path, failure):
+    async def sc(app, pilot, client, eng):
+        original = client.send
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed(body):
+            if not isinstance(body, s.TurnInterrupt):
+                return await original(body)
+            entered.set()
+            await release.wait()
+            if failure == "connect":
+                raise httpx.ConnectError("test no connection")
+            if failure == "lost":
+                raise httpx.ReadError("test connection lost")
+            if failure == "refused":
+                return s.Response(id="x", ok=False, error=s.ErrorInfo(code="denied", message="test refusal"))
+            return s.Response(id="x", result={"interrupted": 0 if failure == "idle" else 1})
+
+        client.send = delayed
+        app.busy = True
+        app.composer.text = "keep this draft"
+        app.stop_turn()
+        await until(entered.is_set, pilot)
+        assert "stop requested" in app.transcript_text()
+        assert "turn stopped" not in app.transcript_text()
+        release.set()
+        await pilot.pause(.1)
+        assert "turn stopped" not in app.transcript_text()
+        assert app.busy
+        assert app.composer.text == "keep this draft"
+        if failure == "accepted":
+            app.handle(s.Event(seq=999, type="turn.completed", session=app.session,
+                               body=s.TurnCompleted(turn_id="test", stop_reason="interrupted")))
+            assert "turn stopped" in app.transcript_text()
+            assert not app.busy
+        elif failure == "connect":
+            assert "not sent:" in app.transcript_text()
+        elif failure == "idle":
+            assert "no running turn was found" in app.transcript_text()
+        elif failure == "lost":
+            assert "connection lost" in app.transcript_text()
+        else:
+            assert "test refusal" in app.transcript_text()
+
+    run(tmp_path, sc)
