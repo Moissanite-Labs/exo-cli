@@ -6001,6 +6001,7 @@ ruling carries Status, Why, Proposal, Rejected and Open instead, and takes Decis
 - **Rejected:** routine duplicate feature PRs, unreviewed automatic main updates and closing legacy work solely because routing changed.
 - **Revisit if:** repository consolidation or a separately versioned desktop dependency removes the need for a fork. No such migration is authorized by this decision.
 - **Docs and user impact:** `docs/REPOSITORY-WORKFLOW.md`, developer guide section 8, repository agent instructions and the fork's continuity guide. No runtime or user setting changes.
+- **Proposed amendment 2026-10-29 (CLI fork):** The principal's direction is for `exo-cli` to own the CLI while Exo owns the shared engine. Route new CLI-only terminal issues and implementation to `Moissanite-Labs/exo-cli`; route shared core, plugins and web work to Exo. Until extraction completes, Exo's root wheel still ships a TUI copy, so link the CLI change and its exact source commit to a reviewed Exo integration and verify the shipped behavior. Preserve existing authors, branches and unique work. This third-repository routing and its cross-repository integration procedure require review by the affected owners; this proposal does not claim the canonical Exo workflow has already been amended, change package ownership, or authorize runtime migration.
 
 ## D-091 (2026-10-29) A failed model list says which failure it was, and offers a retry only where one helps
 - **Status:** Accepted, effective for the next release.
