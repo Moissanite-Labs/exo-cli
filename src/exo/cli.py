@@ -81,6 +81,8 @@ LAZY = {
                         'group knowledge: publish, read, list, history [experimental]'),
     'swarm-plan': ('swarm_plan_cmd', 'cmd_swarm_plan',
                    'group plans: list, status (read-only) [experimental]'),
+    'swarm-group': ('swarm_group_cmd', 'cmd_swarm_group',
+                    'swarm groups: list, observe (read-only) [experimental]'),
     'models': ('models_cmd', 'cmd_models', 'configured providers, keys found, and the route for each role'),
     'providers': ('providers_cmd', 'cmd_providers',
                   'set up model providers: status, add or remove a key, test, default model'),
