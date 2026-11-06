@@ -4,6 +4,7 @@
              [--mode conductor|socratic] [--conductor PROFILE] [--conversation]
              [--max-turns N] [--idle-timeout SECONDS]
   exo swarm --profiles seat1,seat2 --start --plan PLAN.json --grants GRANTS.json [...]
+             [--durable-attempts]
 
 Launches one group through the core's group_launch.create, binds the member
 engines, and serves the owner engine on a Unix socket or stdio so the user
@@ -41,6 +42,14 @@ launch principal of the created group. File shape is checked before the group
 is created; the plan is bound to the group by the core validate_plan after
 create and before any member engine or model call, and the core host gate
 still checks every plan start. See docs/SWARM-PLAN-CLI.md.
+
+``--durable-attempts`` (only with ``--plan``/``--grants``/``--start``) opts the plan start
+in to the core's durable attempt ledger. The CLI only passes ``durable_attempts=True`` to
+``launch.start``. Without the flag the call is exactly ``launch.start(plan=, grants=)``.
+It adds no grants and no defaults, and it needs a core whose GroupLaunch.start accepts the
+argument. An older core refuses the start, and the CLI reports the refusal as
+``group plan start refused (TypeError)``. The flag is checked before any core import, file
+read or group creation. See docs/SWARM-PLAN-CLI.md.
 
 Principal group controls (/group start and friends) require a client on the
 Unix socket; the stdio protocol alone cannot grant principal status. This
@@ -92,6 +101,9 @@ def register(sp, common) -> None:
                    help='JSON task plan to run at start (requires --grants and --start; not with --conversation)')
     p.add_argument('--grants', metavar='FILE', default=None,
                    help='JSON host grants for --plan; explicit, never defaulted (requires --plan and --start)')
+    p.add_argument('--durable-attempts', dest='durable_attempts', action='store_true', default=False,
+                   help='opt in to the core durable attempt ledger for --plan (needs --plan, --grants and --start, '
+                        'plus a core with durable launch support). No retries and no crash recovery.')
     p.add_argument('--start', action='store_true',
                    help='run one model turn per member immediately; without it no run occurs until a principal /group start. '
                         'With --conversation, start the bounded reactive conversation instead.')
@@ -304,6 +316,10 @@ def cmd_swarm(a) -> int:
         if a.conversation or a.max_turns is not None or a.idle_timeout is not None:
             return _err('--plan/--grants cannot be combined with --conversation, --max-turns or --idle-timeout')
 
+    durable = bool(getattr(a, 'durable_attempts', False))
+    if durable and not plan_mode:
+        return _err('--durable-attempts requires --plan and --grants (and --start)')
+
     # The bounds mean nothing without the conversation opt-in, and the opt-in
     # means nothing without --start: reject both before any core import or
     # allocation so a flag is never silently ignored.
@@ -361,8 +377,10 @@ def cmd_swarm(a) -> int:
                     validated = validate_plan(plan_raw, grants, group=launch.group)
                 except ContractError as exc:
                     raise LaunchError(_contract_error(exc)) from None
+                # Forward the opt-in only when set, so the default call is unchanged.
+                start_kw = {'durable_attempts': True} if durable else {}
                 try:
-                    launch.start(plan=validated, grants=grants)
+                    launch.start(plan=validated, grants=grants, **start_kw)
                 except Exception as exc:
                     raise LaunchError(f'group plan start refused ({type(exc).__name__}); '
                                       'the core host gate rejected it') from None
@@ -385,6 +403,8 @@ def cmd_swarm(a) -> int:
             where = 'stdio' if a.stdio or not a.socket else f'unix:{a.socket}'
             if plan_id is not None:
                 state = f'started: validated plan {plan_id[:12]} with {plan_tasks} task(s)'
+                if durable:
+                    state += ' (durable attempts)'
             elif a.conversation:
                 state = 'started: bounded reactive conversation running'
                 if a.max_turns is not None or a.idle_timeout is not None:
