@@ -79,6 +79,8 @@ LAZY = {
     'profile': ('profile_cmd', 'cmd_profile', 'create profiles (seats) on the profile store [experimental]'),
     'swarm-knowledge': ('swarm_knowledge_cmd', 'cmd_swarm_knowledge',
                         'group knowledge: publish, read, list, history [experimental]'),
+    'swarm-plan': ('swarm_plan_cmd', 'cmd_swarm_plan',
+                   'group plans: list, status (read-only) [experimental]'),
     'models': ('models_cmd', 'cmd_models', 'configured providers, keys found, and the route for each role'),
     'providers': ('providers_cmd', 'cmd_providers',
                   'set up model providers: status, add or remove a key, test, default model'),
