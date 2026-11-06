@@ -39,7 +39,8 @@ def ns(**over):
     import argparse
     a = argparse.Namespace(cmd='swarm', profiles='builder,checker', seat=None, socket=None,
                            stdio=True, mode='socratic', conductor=None, conversation=False,
-                           start=True, max_turns=None, idle_timeout=None, plan=None, grants=None)
+                           start=True, max_turns=None, idle_timeout=None, plan=None, grants=None,
+                           durable_attempts=False)
     return argparse.Namespace(**{**vars(a), **over})
 
 
@@ -260,6 +261,91 @@ def test_host_start_refusal_is_sanitized_and_closes(tmp_path, core):
     assert names(core.calls) == ['create', 'launch.start', 'launch.aclose']
 
 
+# --- --durable-attempts: opt-in forwarding and early refusal ------------------------------
+
+def _plan_files(tmp_path):
+    return dict(plan=write(tmp_path, 'p.json', plan_doc()), grants=write(tmp_path, 'g.json', grants_doc()))
+
+
+def test_durable_flag_forwards_true_only_when_set(tmp_path, core):
+    rc, err = run_cmd(ns(durable_attempts=True, **_plan_files(tmp_path)))
+    assert rc == 0, err
+    kw = core.calls[1][1]
+    assert set(kw) == {'plan', 'grants', 'durable_attempts'}
+    assert kw['durable_attempts'] is True
+    assert 'validated plan' in err and '1 task(s)' in err and '(durable attempts)' in err
+    assert names(core.calls) == ['create', 'launch.start', 'serve', 'launch.aclose']
+
+
+def test_default_call_kwargs_are_unchanged(tmp_path, core):
+    files = _plan_files(tmp_path)
+    rc, err = run_cmd(ns(**files))
+    assert rc == 0, err
+    assert set(core.calls[1][1]) == {'plan', 'grants'}
+    assert 'durable' not in err
+    core.calls.clear()
+    legacy = ns(**files)
+    del legacy.durable_attempts  # an older Namespace without the attribute still works
+    rc, err = run_cmd(legacy)
+    assert rc == 0, err
+    assert set(core.calls[1][1]) == {'plan', 'grants'}
+
+
+def test_parser_flag_defaults_false_and_is_a_switch():
+    import argparse
+    top = argparse.ArgumentParser()
+    sp = top.add_subparsers(dest='cmd')
+    swarm_cmd.register(sp, None)
+    base = ['swarm', '--profiles', 'a,b']
+    assert top.parse_args(base).durable_attempts is False
+    assert top.parse_args(base + ['--durable-attempts']).durable_attempts is True
+
+
+@pytest.mark.parametrize('over, msg', [
+    (dict(start=True), '--durable-attempts requires --plan and --grants'),
+    (dict(start=False), '--durable-attempts requires --plan and --grants'),
+    (dict(conversation=True), '--durable-attempts requires --plan and --grants'),
+    (dict(max_turns=3), '--durable-attempts requires --plan and --grants'),
+    (dict(plan='PLAN-NOT-READ.json'), '--plan and --grants must be given together'),
+    (dict(grants='GRANTS-NOT-READ.json'), '--plan and --grants must be given together'),
+])
+def test_durable_without_full_plan_mode_fails_before_core(core, monkeypatch, over, msg):
+    def no_read(*a, **k):
+        raise AssertionError('file read before the flag check')
+    monkeypatch.setattr(swarm_cmd, '_read_json_file', no_read)
+    rc, err = run_cmd(ns(durable_attempts=True, **over))
+    assert rc == 1 and msg in err
+    assert core.calls == []
+
+
+def test_durable_with_plan_but_no_start_fails_before_core(tmp_path, core):
+    rc, err = run_cmd(ns(durable_attempts=True, start=False, **_plan_files(tmp_path)))
+    assert rc == 1 and '--plan/--grants require --start' in err
+    assert core.calls == []
+
+
+@pytest.mark.parametrize('over', [dict(conversation=True), dict(max_turns=3), dict(idle_timeout=2.0)])
+def test_durable_with_conversation_flags_fails_before_core(tmp_path, core, over):
+    rc, err = run_cmd(ns(durable_attempts=True, **over, **_plan_files(tmp_path)))
+    assert rc == 1 and 'cannot be combined with --conversation' in err
+    assert core.calls == []
+
+
+def test_durable_checked_before_core_import(monkeypatch):
+    # Nothing from the core is imported, so a missing core cannot mask the flag error.
+    monkeypatch.setitem(sys.modules, 'exo.group_launch', None)
+    rc, err = run_cmd(ns(durable_attempts=True))
+    assert rc == 1 and '--durable-attempts requires' in err and 'no swarm group launch' not in err
+
+
+def test_durable_host_refusal_is_sanitized_and_closes(tmp_path, core):
+    core.start_exc = TypeError(f'unexpected keyword durable_attempts {SECRET}')
+    rc, err = run_cmd(ns(durable_attempts=True, **_plan_files(tmp_path)))
+    assert rc == 1 and 'group plan start refused (TypeError)' in err
+    assert SECRET not in err
+    assert names(core.calls) == ['create', 'launch.start', 'launch.aclose']
+
+
 # --- one offline end-to-end run on real CoreEngine members --------------------------------
 
 MODELS = {'fake': {'rules': [{'match': f'MARK-{t.upper()}', 'steps': [f'{t.upper()}-REPLY']}
@@ -356,3 +442,38 @@ def test_real_core_refused_binding_makes_no_model_call(tmp_path, home, real_core
     assert rc == 1 and 'core contract' in err
     assert real_core.model_calls == 0
     assert real_core.closed
+
+
+def _supervision_tables(launch):
+    return {r[0] for r in launch.store._q(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'swarm_supervision%'")}
+
+
+@pytest.mark.parametrize('durable', [True, False])
+def test_real_core_durable_flag_end_to_end(tmp_path, home, real_core, monkeypatch, durable):
+    import inspect
+    from exo import group_launch
+    if 'durable_attempts' not in inspect.signature(group_launch.GroupLaunch.start).parameters:
+        pytest.skip('this core has no durable launch support')
+    plan = plan_doc([task('b1'), task('c1', profile='checker', depends_on=['b1'])])
+    real_validate = contract.validate_plan
+    seen = []
+
+    def validate(raw, grants, **kw):  # observe only: the real contract decides
+        out = real_validate(raw, grants, **kw)
+        real_core.plan_id = out.plan_id
+        seen.append(out.plan_id)
+        return out
+    monkeypatch.setattr(contract, 'validate_plan', validate)
+    rc, err = run_cmd(ns(seat='owner', durable_attempts=durable, plan=write(tmp_path, 'p.json', plan),
+                         grants=write(tmp_path, 'g.json', grants_doc(permits={}))))
+    assert rc == 0, err
+    assert real_core.plan_state == 'settled' and real_core.closed
+    assert ('(durable attempts)' in err) is durable
+    tables = _supervision_tables(real_core.launch)
+    assert bool(tables) is durable
+    from exo.core.group_plan_execution import PlanExecutions
+    launch = real_core.launch
+    rows = PlanExecutions(launch.host._groups).tasks(seen[0], group_id=launch.group.id,
+                                                    owner=launch.group.owner)
+    assert {r.task_id: r.state for r in rows} == {'b1': 'completed', 'c1': 'completed'}
