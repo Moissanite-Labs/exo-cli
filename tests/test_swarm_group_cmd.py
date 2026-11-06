@@ -235,7 +235,7 @@ def test_group_id_with_core_grammar_accepted(fake, capsys):
     (['observe', G, '--limit', '٣'], '--limit'), (['observe', G, '--after', '-1'], '--after'),
     (['observe', G, '--after', '9223372036854775808'], '--after'), (['observe', G, '--after', '1.5'], '--after'),
     (['observe'], 'group'), (['observe', G, '--owner', 'x'], '--owner'), (['observe', G, '--member', 'x'], '--member'),
-    (['send', G], 'invalid choice'), (['create'], 'invalid choice'), (['start', G], 'invalid choice'),
+    (['create'], 'invalid choice'), (['start', G], 'invalid choice'),
     (['stop', G], 'invalid choice'), ([], 'required'),
 ])
 def test_parser_rejects_before_dispatch(argv, bad, capsys, monkeypatch, climod):
@@ -387,7 +387,7 @@ def test_import_loads_no_group_module():
 def test_registry_entry_is_lazy_and_listed(climod):
     cli = climod
     assert cli.LAZY['swarm-group'][:2] == ('swarm_group_cmd', 'cmd_swarm_group')
-    assert 'read-only' in cli.LAZY['swarm-group'][2]
+    assert 'send' in cli.LAZY['swarm-group'][2] and 'read-only' not in cli.LAZY['swarm-group'][2]
 
 
 def test_module_import_pulls_no_client_or_httpx():

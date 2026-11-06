@@ -1,7 +1,8 @@
-"""exo swarm-group: read-only listing and observation of the caller's swarm groups.
+"""exo swarm-group: list, observe and send to the caller's swarm groups.
 
   exo swarm-group list
   exo swarm-group observe GROUP [--after SEQ] [--limit N]
+  exo swarm-group send GROUP --text TEXT [--audience PROFILE ...]
 
 Each command talks to the swarm core over its local Unix socket (exod) as an
 interactive principal and hands the request to the core's ``group`` command:
@@ -10,6 +11,7 @@ interactive principal and hands the request to the core's ``group`` command:
 
   list:     op ``list``     payload {}
   observe:  op ``observe``  payload {"id": GROUP, "after": SEQ, "limit": N}
+  send:     op ``send``     payload {"id": GROUP, "text": TEXT[, "audience": [PROFILE, ...]]}
 
 Bounds are the core's own (``exo.core.group_commands``): ``list`` takes no
 fields and has no limit, so this CLI has no limit flag for it. ``observe`` takes
@@ -18,12 +20,22 @@ GROUP is a non-empty string; the core accepts any such string, and this CLI also
 requires at most 128 printable characters (the core's id bound for plan calls).
 The core's ``observe`` also accepts a ``member`` filter. It is not exposed here.
 
+``send`` stores one human message. The core only requires TEXT to be non-blank;
+the CLI additionally limits it to 16000 characters (a CLI bound, not a core
+guarantee). ``--audience`` may repeat; each target is a printable string of 1..128
+characters, duplicates are dropped keeping the first occurrence, and at most 64
+distinct targets are accepted. When ``--audience`` is absent the key is left out of
+the payload and the core addresses every member. Whether each target is a member is
+the core's decision (a wrong target and a wrong group give the core's own refusal).
+A host in the core's process may wake a running conversation for the stored message;
+the CLI makes no claim that anything processes it.
+
 The owner is never placed in the payload (the core derives it from the
-connection's principal) and nothing here can mutate: no send, no create, no
-start, no pause/resume/stop. Output is the core's JSON answer, re-serialised as
-JSON after its shape was checked. A response of an unexpected shape is an error,
-never an empty result. Message text in the answer is untrusted engine output: it
-is printed as JSON data and never interpreted.
+connection's principal). There is no create, start, pause, resume, stop or retry.
+Output is the core's JSON answer, re-serialised as JSON after its shape was
+checked. A response of an unexpected shape is an error, never an empty result.
+Message text in the answer is untrusted engine output: it is printed as JSON
+data and never interpreted.
 """
 
 from __future__ import annotations
@@ -40,12 +52,15 @@ LIMIT_MIN, LIMIT_MAX, LIMIT_DEFAULT = 1, 1000, 100
 AFTER_MAX = 2 ** 63 - 1
 GROUP_MAX = 128
 _MSG_MAX = 200
+TEXT_MAX = 16000
+TARGET_MAX = 128
+TARGETS_MAX = 64
 
 
 def register(sp, common) -> None:
     p = sp.add_parser(
         'swarm-group',
-        help='swarm groups: list, observe (read-only) [experimental]')
+        help='swarm groups: list, observe, send a message [experimental]')
     sub = p.add_subparsers(dest='swarm_group_cmd', required=True)
 
     sub.add_parser('list', parents=[common], help='list the swarm groups you own')
@@ -57,6 +72,14 @@ def register(sp, common) -> None:
                    help='only messages with a sequence number above this (default 0)')
     o.add_argument('--limit', type=_limit, default=LIMIT_DEFAULT,
                    help='max messages (1..1000, default 100)')
+
+    sd = sub.add_parser('send', parents=[common],
+                        help='store a human message in an owned group (not an edit of a running prompt)')
+    sd.add_argument('group', help='swarm group id')
+    sd.add_argument('--text', required=True, type=_text,
+                    help=f'message text, not blank, at most {TEXT_MAX} characters')
+    sd.add_argument('--audience', action='append', type=_target, metavar='PROFILE',
+                    help='member profile to address; repeat for several (default: every member)')
 
 
 def _int_ok(value: Any, lo: int, hi: int) -> bool:
@@ -94,6 +117,43 @@ def _after(raw: str) -> int:
     if not _after_ok(value):
         raise argparse.ArgumentTypeError(msg)
     return value
+
+
+def _text_ok(text: Any) -> bool:
+    return isinstance(text, str) and bool(text.strip()) and len(text) <= TEXT_MAX
+
+
+def _target_ok(target: Any) -> bool:
+    return (isinstance(target, str) and bool(target.strip()) and len(target) <= TARGET_MAX
+            and target.isprintable())
+
+
+def _text(raw: str) -> str:
+    """argparse type: non-blank text of at most 16000 characters."""
+    if not _text_ok(raw):
+        raise argparse.ArgumentTypeError(f'--text must be non-blank and at most {TEXT_MAX} characters')
+    return raw
+
+
+def _target(raw: str) -> str:
+    """argparse type: one printable audience profile of 1..128 characters."""
+    if not _target_ok(raw):
+        raise argparse.ArgumentTypeError(
+            f'--audience must be a non-blank printable string of at most {TARGET_MAX} characters')
+    return raw
+
+
+def _targets(raw: Any) -> list[str] | None:
+    """Distinct targets in first-occurrence order, None when absent; ValueError when invalid."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)) or not raw or not all(_target_ok(x) for x in raw):
+        raise ValueError('--audience must be a non-blank printable string of at most '
+                         f'{TARGET_MAX} characters')
+    out = list(dict.fromkeys(raw))
+    if len(out) > TARGETS_MAX:
+        raise ValueError(f'--audience accepts at most {TARGETS_MAX} distinct targets')
+    return out
 
 
 def _group_ok(group: Any) -> bool:
@@ -217,9 +277,25 @@ def _check_observe(out: dict[str, Any], after: int, limit: int) -> None:
         raise bad
 
 
+def _check_send(out: dict[str, Any], text: str, audience: list[str] | None) -> None:
+    """The send answer: one stored human message, matching what was sent."""
+    bad = _Refused('malformed send response from the swarm core')
+    aud = out.get('audience')
+    if (set(out) != {'seq', 'id', 'sender', 'sender_kind', 'audience', 'text', 'created'}
+            or not _int_ok(out.get('seq'), 1, AFTER_MAX)
+            or not isinstance(out.get('id'), str) or not out['id']
+            or not isinstance(out.get('sender'), str) or not out['sender']
+            or out.get('sender_kind') != 'human'
+            or not _is_str_list(aud) or not aud or len(set(aud)) != len(aud)
+            or out.get('text') != text
+            or not isinstance(out.get('created'), str)
+            or (audience is not None and aud != audience)):
+        raise bad
+
+
 def cmd_swarm_group(a) -> int:
     action = getattr(a, 'swarm_group_cmd', None)
-    if action not in ('list', 'observe'):
+    if action not in ('list', 'observe', 'send'):
         return _err(f'unknown group action {_clean(repr(action))}')
     if action == 'observe':
         group = getattr(a, 'group', None)
@@ -231,10 +307,27 @@ def cmd_swarm_group(a) -> int:
             return _err('--after must be an integer in 0..9223372036854775807')
         if not _limit_ok(limit):
             return _err('--limit must be an integer in 1..1000')
+    if action == 'send':
+        group = getattr(a, 'group', None)
+        text = getattr(a, 'text', None)
+        if not _group_ok(group):
+            return _err(f'GROUP must be a non-empty printable string of at most {GROUP_MAX} characters')
+        if not _text_ok(text):
+            return _err(f'--text must be non-blank and at most {TEXT_MAX} characters')
+        try:
+            audience = _targets(getattr(a, 'audience', None))
+        except ValueError as exc:
+            return _err(str(exc))
+        payload = {'id': group, 'text': text}
+        if audience is not None:
+            payload['audience'] = audience
     try:
         if action == 'list':
             out = _request('list', {})
             _check_list(out)
+        elif action == 'send':
+            out = _request('send', payload)
+            _check_send(out, text, audience)
         else:
             out = _request('observe', {'id': group, 'after': after, 'limit': limit})
             _check_observe(out, after, limit)
