@@ -30,3 +30,22 @@
 - It needs `--start`. Without it the CLI refuses before the core is imported, a file is read, or a group is created.
 - It adds no grants, no defaults and no permissions. Grants still come only from the grants file.
 - Minimum core: a core whose `GroupLaunch.start` accepts `knowledge` (core PR 1209). The CLI does not check the core version and does not emulate the feature. If the core is older, a plan start prints `group plan start refused (TypeError)` and the other starts print `group start failed: ...`.
+
+## exo swarm-plan list / status (read-only)
+
+`exo swarm-plan list GROUP [--limit N]` and `exo swarm-plan status GROUP PLAN [--limit N]`
+
+- Read-only. Each call is one `CommandRun name=group` request over the local socket as principal `chat`. It never sends `owner`, grants, or any mutating subcommand. The core derives ownership from the connection principal.
+- `list` sends `plan_list {"id": GROUP, "limit": N}`. `--limit` is 1..200, default 50.
+- `status` sends `plan_status {"id": GROUP, "plan_id": FULL_ID, "limit": N}`. `--limit` is 1..200 (task rows), default 50.
+- `PLAN` is either a full 64-character lowercase hex id or a lowercase hex prefix of 8..63 characters. Uppercase, non-hex, whitespace or shorter prefixes are refused before any transport.
+- A full id makes exactly one request (`plan_status`).
+- A prefix first sends `plan_list {"id": GROUP, "limit": 200}`, then:
+  - if `plans_truncated` is true the CLI refuses, whatever the list holds (even zero or one match): a truncated list cannot prove a prefix is unique. Pass the full 64-hex id.
+  - zero matches: `no such plan`; two or more: `ambiguous`;
+  - exactly one valid full id in a complete list: one `plan_status` request with that full id.
+  No `plan_status` request is sent in any refused case.
+- Responses are shape-checked and fail closed: a malformed `plan_list` or `plan_status` reply (wrong types, missing fields, duplicate or invalid ids, wrong group or plan id echoed, too many rows for the limit) is an error, never treated as empty.
+- Output is the core's JSON object printed as JSON only. Task `result`/`error` fields are untrusted engine output and are not interpreted. Errors are one line on stderr (`exo swarm-plan: ...`, rc 1) with control characters stripped and length bounded: transport failures print a fixed `transport` message (no exception text), core refusals print the core's code and message.
+- Dependency: needs a core with the read-only `plan_list` and `plan_status` group subcommands (core PR 1210). `plan_status` only answers for plans the caller owns that have started with durable plan tables. Otherwise the core refuses. Older cores refuse the unknown subcommand and the CLI reports that refusal. The CLI does not check the core version.
+- Tests are offline with a fake client. No live core integration is claimed.
