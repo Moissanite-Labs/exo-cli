@@ -13,7 +13,8 @@ from exo import cli, swarm_cmd
 def ns(**over):
     a = argparse.Namespace(cmd='swarm', profiles='seat1,seat2', seat=None, socket=None,
                            stdio=False, mode='conductor', conductor=None, conversation=False,
-                           start=False, max_turns=None, idle_timeout=None)
+                           start=False, max_turns=None, idle_timeout=None,
+                           plan=None, grants=None)
     return argparse.Namespace(**{**vars(a), **over})
 
 
@@ -368,3 +369,41 @@ def test_start_failure_never_serves(monkeypatch, capsys):
     rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True))
     assert rc == 1 and 'group start failed' in err
     assert [c[0] for c in calls] == ['create', 'launch.start', 'host.start', 'launch.aclose']
+
+
+# --- plan flags: parser and fail-closed pairing (no core import, no create) -------
+
+def test_parser_plan_flags_default_none():
+    a = parse('--profiles', 'a,b')
+    assert a.plan is None and a.grants is None
+
+
+def test_parser_plan_flags_accept_paths():
+    a = parse('--profiles', 'a,b', '--start', '--plan', 'p.json', '--grants', 'g.json')
+    assert (a.plan, a.grants, a.start) == ('p.json', 'g.json', True)
+
+
+@pytest.mark.parametrize('over, msg', [
+    ({'plan': 'p.json', 'start': True}, '--plan and --grants must be given together'),
+    ({'grants': 'g.json', 'start': True}, '--plan and --grants must be given together'),
+    ({'plan': 'p.json', 'grants': 'g.json'}, '--plan/--grants require --start'),
+    ({'plan': 'p.json', 'grants': 'g.json', 'start': True, 'conversation': True}, 'cannot be combined'),
+    ({'plan': 'p.json', 'grants': 'g.json', 'start': True, 'max_turns': 3}, 'cannot be combined'),
+    ({'plan': 'p.json', 'grants': 'g.json', 'start': True, 'idle_timeout': 5.0}, 'cannot be combined'),
+])
+def test_plan_flag_combinations_rejected_before_core(monkeypatch, capsys, over, msg):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, out = run_cmd(capsys, ns(**over))
+    assert rc == 1 and msg in err
+    assert calls == []  # nothing created, no file read, nothing started
+    assert out == ''
+
+
+def test_legacy_start_never_passes_plan_kwargs(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, out = run_cmd(capsys, ns(stdio=True, start=True))
+    assert rc == 0
+    assert ('launch.start', None) in calls
+    assert 'plan' not in err
