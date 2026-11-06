@@ -51,6 +51,13 @@ argument. An older core refuses the start, and the CLI reports the refusal as
 ``group plan start refused (TypeError)``. The flag is checked before any core import, file
 read or group creation. See docs/SWARM-PLAN-CLI.md.
 
+``--knowledge`` (requires ``--start``) opts the start in to the core's owner-published
+knowledge snapshot. The CLI only passes ``knowledge=True`` to ``launch.start``, on the one-shot,
+conversation and plan starts alike (including ``--durable-attempts``). Without the flag the keyword
+is omitted entirely, so every call is exactly as before. It adds no grants and no defaults, and it
+needs a core whose GroupLaunch.start accepts the argument. The flag is checked before any core
+import, file read or group creation. See docs/SWARM-PLAN-CLI.md.
+
 Principal group controls (/group start and friends) require a client on the
 Unix socket; the stdio protocol alone cannot grant principal status. This
 CLI does not relax authenticated principal handling.
@@ -104,6 +111,9 @@ def register(sp, common) -> None:
     p.add_argument('--durable-attempts', dest='durable_attempts', action='store_true', default=False,
                    help='opt in to the core durable attempt ledger for --plan (needs --plan, --grants and --start, '
                         'plus a core with durable launch support). No retries and no crash recovery.')
+    p.add_argument('--knowledge', action='store_true', default=False,
+                   help='opt in to the core owner-published knowledge snapshot for the start (requires --start; '
+                        'needs a core whose GroupLaunch.start accepts knowledge)')
     p.add_argument('--start', action='store_true',
                    help='run one model turn per member immediately; without it no run occurs until a principal /group start. '
                         'With --conversation, start the bounded reactive conversation instead.')
@@ -320,6 +330,10 @@ def cmd_swarm(a) -> int:
     if durable and not plan_mode:
         return _err('--durable-attempts requires --plan and --grants (and --start)')
 
+    knowledge = bool(getattr(a, 'knowledge', False))
+    if knowledge and not a.start:
+        return _err('--knowledge requires --start')
+
     # The bounds mean nothing without the conversation opt-in, and the opt-in
     # means nothing without --start: reject both before any core import or
     # allocation so a flag is never silently ignored.
@@ -368,6 +382,7 @@ def cmd_swarm(a) -> int:
         """launch.start, serve and aclose share this one loop so runtime tasks never cross loops."""
         try:
             plan_id = None
+            know_kw = {'knowledge': True} if knowledge else {}
             if plan_mode:
                 # Bind after create, before start: owner comes from the created group (the
                 # launch principal), never the file; the core contract and then the host
@@ -379,6 +394,7 @@ def cmd_swarm(a) -> int:
                     raise LaunchError(_contract_error(exc)) from None
                 # Forward the opt-in only when set, so the default call is unchanged.
                 start_kw = {'durable_attempts': True} if durable else {}
+                start_kw.update(know_kw)
                 try:
                     launch.start(plan=validated, grants=grants, **start_kw)
                 except Exception as exc:
@@ -394,9 +410,9 @@ def cmd_swarm(a) -> int:
                             kwargs['max_turns'] = a.max_turns
                         if a.idle_timeout is not None:
                             kwargs['idle_timeout'] = a.idle_timeout
-                        launch.start(conversation=ConversationOptions(**kwargs))
+                        launch.start(conversation=ConversationOptions(**kwargs), **know_kw)
                     else:
-                        launch.start()
+                        launch.start(**know_kw)
                 except Exception as exc:
                     raise LaunchError(f'group start failed: {exc}') from exc
             from exo.server.app import serve
@@ -420,6 +436,8 @@ def cmd_swarm(a) -> int:
                 state = 'started: one model turn per member scheduled (one-shot)'
             else:
                 state = 'not started: waiting for an explicit principal /group start'
+            if knowledge:
+                state += ' (knowledge)'
             print(f'exo swarm: group {launch.group.id} ({launch.group.mode}) serving on {where}; '
                   f'{state}', file=sys.stderr)
             task = asyncio.create_task(

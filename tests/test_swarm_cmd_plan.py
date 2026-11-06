@@ -40,7 +40,7 @@ def ns(**over):
     a = argparse.Namespace(cmd='swarm', profiles='builder,checker', seat=None, socket=None,
                            stdio=True, mode='socratic', conductor=None, conversation=False,
                            start=True, max_turns=None, idle_timeout=None, plan=None, grants=None,
-                           durable_attempts=False)
+                           durable_attempts=False, knowledge=False)
     return argparse.Namespace(**{**vars(a), **over})
 
 
@@ -477,3 +477,70 @@ def test_real_core_durable_flag_end_to_end(tmp_path, home, real_core, monkeypatc
     rows = PlanExecutions(launch.host._groups).tasks(seen[0], group_id=launch.group.id,
                                                     owner=launch.group.owner)
     assert {r.task_id: r.state for r in rows} == {'b1': 'completed', 'c1': 'completed'}
+
+
+# --- --knowledge on the plan path: opt-in forwarding, omitted when false -----------------
+
+def test_knowledge_flag_forwards_true_only_when_set(tmp_path, core):
+    rc, err = run_cmd(ns(knowledge=True, **_plan_files(tmp_path)))
+    assert rc == 0, err
+    assert core.calls[1][1].keys() == {'plan', 'grants', 'knowledge'}
+    assert core.calls[1][1]['knowledge'] is True
+    assert '(knowledge)' in err and '(durable attempts)' not in err
+    assert names(core.calls) == ['create', 'launch.start', 'serve', 'launch.aclose']
+
+
+def test_knowledge_false_or_absent_omits_keyword(tmp_path, core):
+    files = _plan_files(tmp_path)
+    rc, err = run_cmd(ns(**files))
+    assert rc == 0, err
+    assert set(core.calls[1][1]) == {'plan', 'grants'} and 'knowledge' not in err
+    core.calls.clear()
+    legacy = ns(**files)
+    del legacy.knowledge  # an older Namespace without the attribute still works
+    rc, err = run_cmd(legacy)
+    assert rc == 0, err
+    assert set(core.calls[1][1]) == {'plan', 'grants'}
+
+
+def test_knowledge_combined_with_durable_attempts(tmp_path, core):
+    rc, err = run_cmd(ns(knowledge=True, durable_attempts=True, **_plan_files(tmp_path)))
+    assert rc == 0, err
+    kw = core.calls[1][1]
+    assert set(kw) == {'plan', 'grants', 'durable_attempts', 'knowledge'}
+    assert kw['durable_attempts'] is True and kw['knowledge'] is True
+    assert '(durable attempts)' in err and '(knowledge)' in err
+
+
+def test_knowledge_without_start_fails_before_core(tmp_path, core, monkeypatch):
+    def no_read(*a, **k):
+        raise AssertionError('file read before the flag check')
+    monkeypatch.setattr(swarm_cmd, '_read_json_file', no_read)
+    rc, err = run_cmd(ns(knowledge=True, start=False))
+    assert rc == 1 and '--knowledge requires --start' in err
+    rc, err = run_cmd(ns(knowledge=True, start=False, **_plan_files(tmp_path)))
+    assert rc == 1 and '--plan/--grants require --start' in err
+    assert core.calls == []
+
+
+def test_knowledge_checked_before_core_import(monkeypatch):
+    monkeypatch.setitem(sys.modules, 'exo.group_launch', None)
+    rc, err = run_cmd(ns(knowledge=True, start=False))
+    assert rc == 1 and '--knowledge requires --start' in err and 'no swarm group launch' not in err
+
+
+def test_knowledge_host_refusal_is_sanitized_and_closes(tmp_path, core):
+    core.start_exc = TypeError(f'unexpected keyword knowledge {SECRET}')
+    rc, err = run_cmd(ns(knowledge=True, **_plan_files(tmp_path)))
+    assert rc == 1 and 'group plan start refused (TypeError)' in err and SECRET not in err
+    assert names(core.calls)[-1] == 'launch.aclose'
+
+
+def test_parser_knowledge_flag_defaults_false_and_is_a_switch():
+    import argparse
+    top = argparse.ArgumentParser()
+    sp = top.add_subparsers(dest='cmd')
+    swarm_cmd.register(sp, None)
+    base = ['swarm', '--profiles', 'a,b']
+    assert top.parse_args(base).knowledge is False
+    assert top.parse_args(base + ['--start', '--knowledge']).knowledge is True

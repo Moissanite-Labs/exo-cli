@@ -199,7 +199,9 @@ class FakeLaunch:
         self.engine = object()  # GroupLaunch is not an Engine; serve takes launch.engine
         self.calls = calls
 
-    def start(self, *, conversation=None):
+    def start(self, *, conversation=None, **kw):
+        if kw:
+            self.calls.append(('launch.start.kw', kw))
         if conversation is None:
             self.calls.append(('launch.start', None))
             # one-shot: GroupLaunch.start derives audiences from the stored mode
@@ -407,3 +409,76 @@ def test_legacy_start_never_passes_plan_kwargs(monkeypatch, capsys):
     assert rc == 0
     assert ('launch.start', None) in calls
     assert 'plan' not in err
+
+
+# --- --knowledge: opt-in forwarding, omitted when false --------------------------------
+
+def _start_kw(calls):
+    return [c[1] for c in calls if c[0] == 'launch.start.kw']
+
+
+def test_parser_knowledge_defaults_false_and_is_a_switch():
+    assert parse('--profiles', 'a,b').knowledge is False
+    assert parse('--profiles', 'a,b', '--start', '--knowledge').knowledge is True
+
+
+def test_knowledge_one_shot_passes_true(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True, knowledge=True))
+    assert rc == 0, err
+    assert _start_kw(calls) == [{'knowledge': True}]
+    assert ('launch.start', None) in calls
+    assert 'one-shot' in err and '(knowledge)' in err
+
+
+def test_knowledge_conversation_passes_true_with_bounds(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True, conversation=True, max_turns=4,
+                                    knowledge=True))
+    assert rc == 0, err
+    assert _start_kw(calls) == [{'knowledge': True}]
+    conv = [c[1] for c in calls if c[0] == 'launch.start']
+    assert len(conv) == 1 and isinstance(conv[0], FakeConversationOptions) and conv[0].max_turns == 4
+    assert '(knowledge)' in err
+
+
+@pytest.mark.parametrize('over', [dict(), dict(conversation=True)])
+@pytest.mark.parametrize('flagged', ['absent', 'false'])
+def test_knowledge_false_omits_keyword(monkeypatch, capsys, over, flagged):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    a = ns(stdio=True, start=True, **over)
+    if flagged == 'false':
+        a.knowledge = False  # 'absent' keeps the Namespace without the attribute (older callers)
+    rc, err, _ = run_cmd(capsys, a)
+    assert rc == 0, err
+    assert _start_kw(calls) == []
+    assert 'knowledge' not in err
+
+
+@pytest.mark.parametrize('over', [dict(), dict(conversation=True), dict(stdio=True)])
+def test_knowledge_without_start_fails_before_core(monkeypatch, capsys, over):
+    calls = []
+    FakeCore(monkeypatch, calls)
+    monkeypatch.setitem(sys.modules, 'exo.group_launch', None)
+    rc, err, out = run_cmd(capsys, ns(knowledge=True, start=False, **over))
+    assert rc == 1 and '--knowledge requires --start' in err
+    assert calls == [] and out == ''
+    assert 'no swarm group launch' not in err
+
+
+def test_knowledge_start_failure_never_serves(monkeypatch, capsys):
+    calls = []
+    FakeCore(monkeypatch, calls, start_exc=RuntimeError('boom'))
+    rc, err, _ = run_cmd(capsys, ns(stdio=True, start=True, knowledge=True))
+    assert rc == 1 and 'group start failed' in err
+    assert 'serve' not in [c[0] for c in calls] and calls[-1] == ('launch.aclose',)
+
+
+def test_docstring_and_help_document_knowledge(capsys):
+    assert '--knowledge' in swarm_cmd.__doc__ and '\u2014' not in swarm_cmd.__doc__
+    with pytest.raises(SystemExit):
+        parse('--help')
+    assert '--knowledge' in capsys.readouterr().out

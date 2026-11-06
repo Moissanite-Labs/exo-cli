@@ -20,3 +20,13 @@
 - Minimum core: a core whose `GroupLaunch.start` accepts `durable_attempts`. That is the durable dispatch change (core commit `dcf84474`) plus the launch change that forwards the argument. The CLI does not check the core version and does not emulate the feature. If the core is older, `launch.start` raises `TypeError` and the CLI prints `group plan start refused (TypeError)`.
 - Limits: no retries and no crash recovery. The ledger has no terminal result record. A start that fails after the plan id is reserved uses up that plan id.
 - Do not release this flag before the core change ships.
+
+## `--knowledge`
+
+`exo swarm --profiles a,b --start --knowledge` (also with `--conversation`, or with `--plan`/`--grants` and `--durable-attempts`)
+
+- Opt in. It asks the core to use the group's owner-published knowledge snapshot for the start. Without the flag nothing changes: the CLI omits the `knowledge` keyword entirely, so `launch.start()`, `launch.start(conversation=)` and `launch.start(plan=, grants=[, durable_attempts=True])` are called exactly as before.
+- With the flag the CLI adds `knowledge=True` to whichever start call it makes. It passes only that one boolean. The core decides what members see.
+- It needs `--start`. Without it the CLI refuses before the core is imported, a file is read, or a group is created.
+- It adds no grants, no defaults and no permissions. Grants still come only from the grants file.
+- Minimum core: a core whose `GroupLaunch.start` accepts `knowledge` (core PR 1209). The CLI does not check the core version and does not emulate the feature. If the core is older, a plan start prints `group plan start refused (TypeError)` and the other starts print `group start failed: ...`.
