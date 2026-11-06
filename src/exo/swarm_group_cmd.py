@@ -3,6 +3,8 @@
   exo swarm-group list
   exo swarm-group observe GROUP [--after SEQ] [--limit N]
   exo swarm-group send GROUP --text TEXT [--audience PROFILE ...]
+  exo swarm-group status GROUP --socket PATH
+  exo swarm-group pause|resume|stop GROUP [--member PROFILE] --socket PATH
 
 Each command talks to the swarm core over its local Unix socket (exod) as an
 interactive principal and hands the request to the core's ``group`` command:
@@ -30,8 +32,15 @@ the core's decision (a wrong target and a wrong group give the core's own refusa
 A host in the core's process may wake a running conversation for the stored message;
 the CLI makes no claim that anything processes it.
 
+``status``, ``pause``, ``resume`` and ``stop`` are the core's lifecycle ops. They
+require an explicit ``--socket``, and no default socket is ever used for them. They
+act only through a trusted host injected in that core. A core without one refuses
+(``forbidden``) and the CLI reports the refusal. ``--member`` is accepted by
+pause/resume/stop only. ``--socket`` is optional for list/observe/send.
+Payloads: status {"id"}, and pause/resume/stop {"id"} plus "member" only when given.
+
 The owner is never placed in the payload (the core derives it from the
-connection's principal). There is no create, start, pause, resume, stop or retry.
+connection's principal). There is no create, start or retry.
 Output is the core's JSON answer, re-serialised as JSON after its shape was
 checked. A response of an unexpected shape is an error, never an empty result.
 Message text in the answer is untrusted engine output: it is printed as JSON
@@ -60,10 +69,15 @@ TARGETS_MAX = 64
 def register(sp, common) -> None:
     p = sp.add_parser(
         'swarm-group',
-        help='swarm groups: list, observe, send a message [experimental]')
+        help='swarm groups: list, observe, send, status, pause, resume, stop [experimental]')
     sub = p.add_subparsers(dest='swarm_group_cmd', required=True)
 
-    sub.add_parser('list', parents=[common], help='list the swarm groups you own')
+    def _opt_socket(parser):
+        parser.add_argument('--socket', type=_socket,
+                            help='Unix socket path of the core (default: $EXO_HOME/run/exod.sock)')
+
+    lp = sub.add_parser('list', parents=[common], help='list the swarm groups you own')
+    _opt_socket(lp)
 
     o = sub.add_parser('observe', parents=[common],
                        help='read the message history of an owned group')
@@ -72,6 +86,7 @@ def register(sp, common) -> None:
                    help='only messages with a sequence number above this (default 0)')
     o.add_argument('--limit', type=_limit, default=LIMIT_DEFAULT,
                    help='max messages (1..1000, default 100)')
+    _opt_socket(o)
 
     sd = sub.add_parser('send', parents=[common],
                         help='store a human message in an owned group (not an edit of a running prompt)')
@@ -80,6 +95,18 @@ def register(sp, common) -> None:
                     help=f'message text, not blank, at most {TEXT_MAX} characters')
     sd.add_argument('--audience', action='append', type=_target, metavar='PROFILE',
                     help='member profile to address; repeat for several (default: every member)')
+    _opt_socket(sd)
+
+    st = sub.add_parser('status', parents=[common],
+                        help="show an owned group's member states and execution receipt")
+    st.add_argument('group', help='swarm group id')
+    st.add_argument('--socket', required=True, type=_socket, help='Unix socket path of the core (required)')
+    for name, what in (('pause', 'pause'), ('resume', 'resume'), ('stop', 'stop')):
+        c = sub.add_parser(name, parents=[common], help=f'{what} a running group (or one member)')
+        c.add_argument('group', help='swarm group id')
+        c.add_argument('--member', type=_member, metavar='PROFILE',
+                       help=f'{what} only this member profile (default: the whole group)')
+        c.add_argument('--socket', required=True, type=_socket, help='Unix socket path of the core (required)')
 
 
 def _int_ok(value: Any, lo: int, hi: int) -> bool:
@@ -156,6 +183,35 @@ def _targets(raw: Any) -> list[str] | None:
     return out
 
 
+SOCKET_MAX = 4096
+CONTROL_OPS = ('status', 'pause', 'resume', 'stop')
+_DONE_KEY = {'pause': 'paused', 'resume': 'resumed', 'stop': 'stopped'}
+
+
+def _socket_ok(value: Any) -> bool:
+    return (isinstance(value, str) and bool(value.strip()) and len(value) <= SOCKET_MAX
+            and value.isprintable())
+
+
+def _socket(raw: str) -> str:
+    """argparse type: a non-blank printable socket path."""
+    if not _socket_ok(raw):
+        raise argparse.ArgumentTypeError('--socket must be a non-blank printable path')
+    return raw
+
+
+def _member_ok(member: Any) -> bool:
+    return _target_ok(member)
+
+
+def _member(raw: str) -> str:
+    """argparse type: one printable member profile of 1..128 characters."""
+    if not _member_ok(raw):
+        raise argparse.ArgumentTypeError(
+            f'--member must be a non-blank printable string of at most {TARGET_MAX} characters')
+    return raw
+
+
 def _group_ok(group: Any) -> bool:
     return (isinstance(group, str) and bool(group.strip()) and len(group) <= GROUP_MAX
             and group.isprintable())
@@ -174,19 +230,25 @@ def _err(msg: str) -> int:
     return 1
 
 
-def _call(op: str, payload: dict[str, Any]) -> s.Response:
+def _call(op: str, payload: dict[str, Any], socket: str | None = None) -> s.Response:
     """One request to the local core: CommandRun(name='group', args=op + json payload).
 
     The client is imported here so this module loads nothing heavy until a
     command actually runs. Local Unix socket only: no token file, no auth reads,
     no TCP. ``principal='chat'`` marks an interactive principal (D-039).
-    Any transport failure becomes one static message; the exception text is dropped.
+    ``socket`` is the explicit ``--socket`` path, and None means the default core socket
+    (only list/observe/send may omit it). Any transport failure becomes one static
+    message, and the exception text is dropped.
     """
     async def _go() -> s.Response:
         from exo.protocol.client import Client
-        from .cli_chat import default_socket
+        from pathlib import Path
+        path = Path(socket).expanduser() if socket is not None else None
+        if path is None:
+            from .cli_chat import default_socket
+            path = default_socket()
         args = op if not payload else f'{op} ' + json.dumps(payload, sort_keys=True)
-        async with Client(socket=str(default_socket()), principal='chat') as client:
+        async with Client(socket=str(path), principal='chat') as client:
             return await client.send(s.CommandRun(name='group', args=args, session=None))
 
     try:
@@ -213,9 +275,9 @@ def _no_const(name):
     raise ValueError('non-finite number')
 
 
-def _request(op: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _request(op: str, payload: dict[str, Any], socket: str | None = None) -> dict[str, Any]:
     """Send one request and return the core's answer as a dict, or raise _Refused."""
-    resp = _call(op, payload)
+    resp = _call(op, payload, socket)
     if not resp.ok:
         code = _clean(resp.error.code if resp.error else '') or 'error'
         message = _clean(resp.error.message if resp.error else '')
@@ -293,10 +355,65 @@ def _check_send(out: dict[str, Any], text: str, audience: list[str] | None) -> N
         raise bad
 
 
+def _nonempty_str(v: Any) -> bool:
+    return isinstance(v, str) and bool(v)
+
+
+def _check_status(out: dict[str, Any], group: str) -> None:
+    """The status answer (core _status_view): fail closed on any deviation."""
+    bad = _Refused('malformed status response from the swarm core')
+    members, receipt = out.get('members'), out.get('receipt')
+    if (set(out) != {'id', 'owner', 'members', 'local_runtime', 'reconciliation_required', 'receipt'}
+            or out.get('id') != group or not _nonempty_str(out.get('owner'))
+            or not isinstance(out.get('local_runtime'), bool)
+            or not isinstance(out.get('reconciliation_required'), bool)
+            or not isinstance(members, list)):
+        raise bad
+    seen = set()
+    for m in members:
+        if (not isinstance(m, dict) or set(m) != {'profile', 'state'}
+                or not _nonempty_str(m['profile']) or not _nonempty_str(m['state'])
+                or m['profile'] in seen):
+            raise bad
+        seen.add(m['profile'])
+    if receipt is None:
+        return
+    if (not isinstance(receipt, dict)
+            or set(receipt) != {'id', 'state', 'created', 'finished', 'members'}
+            or not _nonempty_str(receipt['id']) or not _nonempty_str(receipt['state'])
+            or not _nonempty_str(receipt['created'])
+            or not (receipt['finished'] is None or _nonempty_str(receipt['finished']))
+            or not isinstance(receipt['members'], dict)
+            or not all(_nonempty_str(k) and _nonempty_str(v) for k, v in receipt['members'].items())):
+        raise bad
+
+
+def _check_control(out: dict[str, Any], op: str, group: str, member: str | None) -> None:
+    """The pause/resume/stop answer: {id, <done>: True, member}, echoing what was asked."""
+    bad = _Refused(f'malformed {op} response from the swarm core')
+    if (set(out) != {'id', _DONE_KEY[op], 'member'} or out.get('id') != group
+            or out.get(_DONE_KEY[op]) is not True or out.get('member') != member):
+        raise bad
+
+
 def cmd_swarm_group(a) -> int:
     action = getattr(a, 'swarm_group_cmd', None)
-    if action not in ('list', 'observe', 'send'):
+    if action not in ('list', 'observe', 'send', *CONTROL_OPS):
         return _err(f'unknown group action {_clean(repr(action))}')
+    sock = getattr(a, 'socket', None)
+    if action in CONTROL_OPS and not _socket_ok(sock):
+        return _err('--socket is required and must be a non-blank printable path')
+    if sock is not None and not _socket_ok(sock):
+        return _err('--socket must be a non-blank printable path')
+    member = None
+    if action in CONTROL_OPS:
+        group = getattr(a, 'group', None)
+        if not _group_ok(group):
+            return _err(f'GROUP must be a non-empty printable string of at most {GROUP_MAX} characters')
+        if action != 'status':
+            member = getattr(a, 'member', None)
+            if member is not None and not _member_ok(member):
+                return _err(f'--member must be a non-blank printable string of at most {TARGET_MAX} characters')
     if action == 'observe':
         group = getattr(a, 'group', None)
         after = getattr(a, 'after', 0)
@@ -323,13 +440,20 @@ def cmd_swarm_group(a) -> int:
             payload['audience'] = audience
     try:
         if action == 'list':
-            out = _request('list', {})
+            out = _request('list', {}, sock)
             _check_list(out)
         elif action == 'send':
-            out = _request('send', payload)
+            out = _request('send', payload, sock)
             _check_send(out, text, audience)
+        elif action == 'status':
+            out = _request('status', {'id': group}, sock)
+            _check_status(out, group)
+        elif action in CONTROL_OPS:
+            body = {'id': group} if member is None else {'id': group, 'member': member}
+            out = _request(action, body, sock)
+            _check_control(out, action, group, member)
         else:
-            out = _request('observe', {'id': group, 'after': after, 'limit': limit})
+            out = _request('observe', {'id': group, 'after': after, 'limit': limit}, sock)
             _check_observe(out, after, limit)
     except _Refused as exc:
         return _err(str(exc))

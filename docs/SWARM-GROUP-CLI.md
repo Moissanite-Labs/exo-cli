@@ -1,8 +1,8 @@
 # exo swarm-group (experimental)
 
 `exo swarm-group` works with swarm groups you own. It can list them, read one
-group's message history, and store a human message in a group. It cannot create,
-start, pause, resume or stop a group.
+group's message history, store a human message in a group, and ask the core for a
+group's status or to pause, resume or stop it. It cannot create or start a group.
 
 ## Commands
 
@@ -10,7 +10,28 @@ start, pause, resume or stop a group.
 exo swarm-group list
 exo swarm-group observe <group-id> [--after N] [--limit N]
 exo swarm-group send <group-id> --text TEXT [--audience PROFILE ...]
+exo swarm-group status <group-id> --socket PATH
+exo swarm-group pause|resume|stop <group-id> [--member PROFILE] --socket PATH
 ```
+
+- `list`, `observe` and `send` accept an optional `--socket PATH`. Without it they use
+  the default core socket.
+- `status`, `pause`, `resume` and `stop` REQUIRE an explicit `--socket PATH`. The
+  default socket is never used. `--member PROFILE` (pause/resume/stop only) limits the
+  action to one member. Without it the key is left out of the request.
+- These four act only through a trusted group host injected in the core. A core
+  without one refuses (`forbidden`) and the CLI prints that refusal. The CLI holds no
+  host authority of its own.
+- `status` prints the core's snapshot: `id`, `owner`, `members` (profile/state),
+  `local_runtime`, `reconciliation_required` and `receipt` (or null). pause/resume/stop
+  print `{"id", "paused"|"resumed"|"stopped": true, "member"}`. Any answer that does
+  not match that shape exactly (including a member that was not the one asked for) is
+  reported as a malformed response and exits 1.
+- Tested twice: offline unit tests with the core client replaced by a recording fake,
+  and a real-socket test (`tests/test_swarm_group_controls_socket.py`) that runs
+  `status` and group-wide `pause`/`resume`/`stop` against a real group host and a real
+  core socket. The socket test also holds one offline provider call pending and shows
+  the four commands still answer while that call is in flight.
 
 - `list` prints the groups owned by the caller. It takes no options.
 - `observe` prints messages from one owned group, oldest first.
@@ -93,9 +114,14 @@ replaced before printing.
 
 ## Limits of this slice
 
-- Only `send` writes. There is no create, start, pause, resume, stop or retry,
-  and a failed `send` is never retried: the CLI cannot tell whether the core
-  stored the message before the failure.
+- `send` stores a message. `pause`, `resume` and `stop` change a running group through
+  the core. There is no create, start or retry, and a failed `send` is never retried:
+  the CLI cannot tell whether the core stored the message before the failure.
+- The real-socket tests cover one fixed config: mode `socratic` with two tasks, and
+  group-wide controls only. No test sends `--member` to a real core.
+- No test proves that a member completes its work after a resume. The held provider
+  call is released only after `stop`.
+- Those socket tests need a swarm core first on `PYTHONPATH` and skip otherwise.
 - The core's `member` filter for `observe` is not exposed.
 - The command needs a running swarm core with the `group` command. Older cores
   answer with their own refusal, which is reported the same way.
