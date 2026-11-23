@@ -114,7 +114,6 @@ def _call(payload: dict[str, Any], op: str) -> s.Response:
     command actually runs. Local Unix socket only: no token file, no auth reads,
     no TCP. ``principal='chat'`` marks an interactive principal (D-039).
     """
-    import httpx
     from exo.protocol.client import Client, ClientError
     from .cli_chat import default_socket
 
@@ -125,7 +124,7 @@ def _call(payload: dict[str, Any], op: str) -> s.Response:
 
     try:
         return asyncio.run(_go())
-    except (ClientError, OSError, httpx.TransportError):
+    except (ClientError, OSError):
         return s.Response(id='', ok=False, error=s.ErrorInfo(
             code='transport', message='cannot reach the swarm core on the local socket'))
 
