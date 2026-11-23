@@ -236,7 +236,7 @@ def test_group_id_with_core_grammar_accepted(fake, capsys):
     (['observe', G, '--after', '9223372036854775808'], '--after'), (['observe', G, '--after', '1.5'], '--after'),
     (['observe'], 'group'), (['observe', G, '--owner', 'x'], '--owner'), (['observe', G, '--member', 'x'], '--member'),
     (['create'], 'invalid choice'), (['start', G], 'invalid choice'),
-    (['stop', G], 'invalid choice'), ([], 'required'),
+    ([], 'required'),
 ])
 def test_parser_rejects_before_dispatch(argv, bad, capsys, monkeypatch, climod):
     called = []
