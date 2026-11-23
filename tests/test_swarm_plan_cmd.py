@@ -366,6 +366,26 @@ def test_socket_connect_failure_is_sanitised(monkeypatch, capsys):
     assert rc == 1 and 'secret' not in err and 'transport' in err
 
 
+@pytest.mark.parametrize('exc_name', ['ConnectError', 'ReadTimeout', 'ConnectTimeout'])
+def test_httpx_transport_error_is_sanitised(fake, capsys, exc_name):
+    import httpx
+    fake.responses = [getattr(httpx, exc_name)('SECRET-TOKEN-abc123 unix:///home/SECRET-USER/exo.sock')]
+    rc, out, err = run(ns('list'), capsys)
+    assert rc == 1 and out == ''
+    assert err == 'exo swarm-plan: transport: cannot reach the swarm core on the local socket\n'
+    assert 'SECRET' not in err and 'Traceback' not in err and 'exo.sock' not in err
+
+
+def test_httpx_connect_error_at_client_open_is_sanitised(monkeypatch, capsys):
+    import httpx
+
+    def boom(*a, **kw):
+        raise httpx.ConnectError('SECRET-TOKEN-abc123 /home/SECRET-USER/exo.sock')
+    monkeypatch.setattr('exo.protocol.client.Client', boom)
+    rc, out, err = run(ns('status', plan=P1), capsys)
+    assert rc == 1 and out == '' and 'SECRET' not in err and 'Traceback' not in err and 'transport' in err
+
+
 # ---- lazy registration -----------------------------------------------------
 
 def _loaded_after(code):
